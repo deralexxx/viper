@@ -259,7 +259,11 @@ class Commands(object):
             self.log('table', dict(header=['ID', 'Title'], rows=rows))
 
         elif args.add:
-            title = raw_input("Enter a title for the new note: ")
+            # this is a bit hacky but adresses https://github.com/botherder/viper/issues/290
+            import sys, locale
+            title= raw_input("Enter a title for the new note: ").decode(sys.stdin.encoding)
+            #title = raw_input("Enter a title for the new note: ")
+            
 
             # Create a new temporary file.
             tmp = tempfile.NamedTemporaryFile(delete=False)
@@ -271,7 +275,8 @@ class Commands(object):
             Database().add_note(__sessions__.current.file.sha256, title, body)
             # Finally, remove the temporary file.
             os.remove(tmp.name)
-
+            # hack to display it again
+            title = title.encode(sys.stdin.encoding)
             self.log('info', "New note with title \"{0}\" added to the current file".format(bold(title)))
 
         elif args.view:
