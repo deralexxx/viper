@@ -2,23 +2,54 @@
 # This file is part of Viper - https://github.com/viper-framework/viper
 # See the file 'LICENSE' for copying permission.
 
-import os
 import json
-import time
-import argparse
+import os
 import tempfile
+import time
+
+# python-cybox
+from cybox.common import ToolInformationList, ToolInformation
+from cybox.objects.file_object import File
+from cybox.common import Time
+from cybox.common import Hash
+# python-stix
+from stix.core import STIXPackage, STIXHeader
+from stix.common import InformationSource
+from stix.common import Identity
+from stix.indicator import Indicator
+from stix.extensions.marking.tlp import TLPMarkingStructure
+from stix.data_marking import Marking, MarkingSpecification
+
+import argparse
+from datetime import datetime
+import ConfigParser
 
 from bottle import route, request, response, run
 
-from viper.common.objects import File
-from viper.core.storage import store_sample, get_sample_path
 from viper.core.database import Database
-from viper.core.session import __sessions__
 from viper.core.plugins import __modules__
 from viper.core.project import __project__
+from viper.core.session import __sessions__
+from viper.core.storage import store_sample, get_sample_path
 from viper.core.ui.commands import Commands
 
 db = Database()
+
+"""
+Config parser
+"""
+
+Config = ConfigParser.ConfigParser()
+Config.read('viper.conf')
+
+
+from stix.utils import set_id_namespace
+NAMESPACE = {Config.get('stix','namespace_url') : Config.get('stix','namespace_name')}
+set_id_namespace(NAMESPACE)
+
+from cybox.utils import set_id_namespace, Namespace
+NAMESPACE = Namespace(Config.get('stix','namespace_url'), Config.get('stix','namespace_name'))
+set_id_namespace(NAMESPACE)
 
 
 def jsonize(data):
@@ -135,7 +166,6 @@ def find_file():
         tags = []
         for tag in row.tag:
             tags.append(tag.tag)
-
         entry = dict(
             id=row.id,
             name=row.name,
@@ -194,6 +224,86 @@ def find_file():
             proj_results.append(details(row))
         results[project] = proj_results
     return jsonize(results)
+
+
+@route('/file/find', method='GET')
+def find_file_get():
+    def details(row):
+        tags = []
+        for tag in row.tag:
+            tags.append(tag.tag)
+        entry = dict(
+            id=row.id,
+            name=row.name,
+            type=row.type,
+            size=row.size,
+            md5=row.md5,
+            sha1=row.sha1,
+            sha256=row.sha256,
+            sha512=row.sha512,
+            crc32=row.crc32,
+            ssdeep=row.ssdeep,
+            created_at=row.created_at.__str__(),
+            tags=tags
+        )
+
+        return entry
+
+    for entry in ['md5', 'sha256', 'ssdeep', 'tag', 'name', 'all', 'latest']:
+        value = request.query.get(entry)
+        if value:
+            key = entry
+            break
+
+    if not value:
+        response.code = 400
+        return jsonize({'message': 'Invalid search term'})
+
+    # Get the scope of the search
+
+    project_search = request.query.get('project')
+    projects = []
+    results = {}
+    if project_search and project_search == 'all':
+        # Get list of project paths
+        projects_path = os.path.join(os.getcwd(), 'projects')
+        if os.path.exists(projects_path):
+            for name in os.listdir(projects_path):
+                projects.append(name)
+        projects.append('../')
+    # Specific Project
+    elif project_search:
+        projects.append(project_search)
+    # Primary
+    else:
+        projects.append('../')
+
+    # Search each Project in the list
+    for project in projects:
+        __project__.open(project)
+        db = Database()
+        proj_results = []
+        rows = db.find(key=key, value=value)
+        for row in rows:
+            if project == '../':
+                project = 'default'
+            proj_results.append(details(row))
+        results[project] = proj_results
+
+
+    #Check which output format is expected
+
+    output_format = request.query.get('output')
+    if output_format == 'stix':
+        stix_result=stix(results)
+        if stix_result:
+        #logger.debug("stix %s",stix_result.to_xml())
+            return stix_result.to_xml()
+        else:
+            response.code = 500
+            return jsonize({'message': 'Error with stix parsing'})
+    else:
+        return jsonize(results)
 
 
 @route('/tags/list', method='GET')
@@ -355,6 +465,109 @@ def add_notes(action):
         return jsonize({'message': 'no action given'})
 
     return jsonize({'message': 'Unable to complete action'})
+
+def stix(json):
+    """
+    Created a stix file based on a json file that is being handed over
+    """
+
+    # Create a new STIXPackage
+    stix_package = STIXPackage()
+
+    # Create a new STIXHeader
+    stix_header = STIXHeader()
+
+    # Add Information Source. This is where we will add the tool information.
+    stix_header.information_source = InformationSource()
+
+    # Create a ToolInformation object. Use the initialization parameters
+    # to set the tool and vendor names.
+    #
+    # Note: This is an instance of cybox.common.ToolInformation and NOT
+    # stix.common.ToolInformation.
+    tool = ToolInformation(
+        tool_name="Viper.li API",
+        tool_vendor="The Viper group http://viper.li"
+    )
+
+    #Adding your identity to the header
+    identity = Identity()
+    identity.name = Config.get('stix', 'producer_name')
+    stix_header.information_source.identity=identity
+
+    # Set the Information Source "tools" section to a
+    # cybox.common.ToolInformationList which contains our tool that we
+    # created above.
+    stix_header.information_source.tools = ToolInformationList(tool)
+
+    stix_header.title = Config.get('stix', 'title')
+    # Set the produced time to now
+    stix_header.information_source.time = Time()
+    stix_header.information_source.time.produced_time = datetime.now()
+
+
+    marking_specification = MarkingSpecification()
+    marking_specification.controlled_structure = "../../../descendant-or-self::node()"
+    tlp = TLPMarkingStructure()
+    tlp.color = Config.get('stix', 'TLP')
+    marking_specification.marking_structures.append(tlp)
+
+    handling = Marking()
+    handling.add_marking(marking_specification)
+
+    # Set the header description
+    stix_header.description =  Config.get('stix', 'description')
+
+    # Set the STIXPackage header
+    stix_package.stix_header = stix_header
+
+    stix_package.stix_header.handling = handling
+    try:
+        for item in json['default']:
+            indicator = Indicator()
+            indicator.title = "File Hash"
+            indicator.description = (
+            "An indicator containing a File observable with an associated hash"
+            )
+            # Create a CyboX File Object
+            f = File()
+
+            sha_value = item['sha256']
+            if sha_value is not None:
+                sha256 = Hash()
+                sha256.simple_hash_value = sha_value
+                h = Hash(sha256, Hash.TYPE_SHA256)
+                f.add_hash(h)
+            sha1_value = item['sha1']
+            if sha_value is not None:
+                sha1 = Hash()
+                sha1.simple_hash_value = sha1_value
+                h = Hash(sha1, Hash.TYPE_SHA1)
+                f.add_hash(h)
+            sha512_value = item['sha512']
+            if sha_value is not None:
+                sha512 = Hash()
+                sha512.simple_hash_value = sha512_value
+                h = Hash(sha512, Hash.TYPE_SHA512)
+                f.add_hash(h)
+
+            f.add_hash(item['md5'])
+
+            #adding the md5 hash to the title as well
+            stix_header.title+=' '+item['md5']
+            f.size_in_bytes=item['size']
+            f.file_format=item['type']
+            f.file_name = item['name']
+            indicator.description = "File hash served by a Viper instance"
+            indicator.add_object(f)
+            stix_package.add_indicator(indicator)
+    except Exception, e:
+        print('Error: %s',format(e))
+        return False
+
+    return stix_package
+
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

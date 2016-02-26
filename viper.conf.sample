@@ -86,3 +86,11 @@ pdns_pass =
 koodous_url = https://koodous.com/api/apks
 koodous_token = d01d9c845e4b2430682241c5faa55e786c129441
 
+[stix]
+TLP=AMBER
+namespace_url=http://www.viper.li
+namespace_name=viper
+title=Malicious File
+description=Extract of a file from a Viper instance
+producer_name=John Smith
+
